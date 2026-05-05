@@ -150,7 +150,7 @@ def filter_recent(circulars, lookback_days):
         else:
             # include undated items (important fallback)
             result.append(c)
-
+return result
 
 
 # ============================================================
