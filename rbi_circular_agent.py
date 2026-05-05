@@ -168,7 +168,8 @@ def build_html_email(circulars, lookback_days: int) -> str:
         )
     else:
         items = []
-        for c in sorted(circulars, key=lambda x: x["date"], reverse=True):
+        # FIX: Handle None dates by sorting them to the end
+        for c in sorted(circulars, key=lambda x: (x["date"] is None, x["date"]), reverse=True):
             d = c["date"].strftime("%d %b %Y") if c["date"] else "—"
             dept = f'<div style="color:#666;font-size:13px;">{c["dept"]}</div>' if c["dept"] else ""
             items.append(
@@ -178,7 +179,6 @@ def build_html_email(circulars, lookback_days: int) -> str:
                 f'{dept}'
                 f'</li>'
             )
-
         body = (
             f"<p>Here are the RBI circulars from the last "
             f"{lookback_days} day(s) as of {today_str}:</p>"
