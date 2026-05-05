@@ -91,7 +91,6 @@ def parse_date(text: str):
 
 
 def fetch_circulars():
-    """Scrape the RBI notifications page and return [{title, url, date, dept}]."""
     headers = {"User-Agent": USER_AGENT}
     resp = requests.get(RBI_NOTIFICATIONS_URL, headers=headers, timeout=HTTP_TIMEOUT)
     resp.raise_for_status()
@@ -100,33 +99,34 @@ def fetch_circulars():
     circulars = []
     seen_urls = set()
 
-    # Each circular link points to NotificationUser.aspx?Id=... (an individual page)
-    for link in soup.find_all("a", href=True):
-        href = link["href"]
+    for link in soup.select("a[href*='NotificationUser.aspx?Id=']"):
         title = link.get_text(strip=True)
-        if not title or "NotificationUser.aspx?Id=" not in href:
-            continue
+        href = link["href"]
 
         full_url = urljoin(RBI_NOTIFICATIONS_URL, href)
         if full_url in seen_urls:
             continue
         seen_urls.add(full_url)
 
-        # The publication date is usually shown next to the link in the same row.
-        # Walk up to the parent table row and look at its full text.
-        parent_row = link.find_parent("tr")
-        row_text = parent_row.get_text(" ", strip=True) if parent_row else ""
-        pub_date = parse_date(row_text)
-
-        # Try to grab the department/issuing body if present (often in a sibling cell)
+        pub_date = None
         dept = ""
+
+        # 🔍 Try multiple ways to extract date
+        # Method 1: Parent row
+        parent_row = link.find_parent("tr")
         if parent_row:
-            cells = [c.get_text(" ", strip=True) for c in parent_row.find_all(["td", "th"])]
-            # Heuristic: department names often contain "Department"
-            for c in cells:
-                if "Department" in c and c != title:
-                    dept = c
-                    break
+            text = parent_row.get_text(" ", strip=True)
+            pub_date = parse_date(text)
+
+        # Method 2: Previous/next sibling text
+        if not pub_date:
+            sibling_text = link.parent.get_text(" ", strip=True)
+            pub_date = parse_date(sibling_text)
+
+        # Method 3: Whole page fallback (rare)
+        if not pub_date:
+            surrounding = link.find_parent().get_text(" ", strip=True)
+            pub_date = parse_date(surrounding)
 
         circulars.append({
             "title": title,
@@ -138,10 +138,19 @@ def fetch_circulars():
     return circulars
 
 
-def filter_recent(circulars, lookback_days: int):
+def filter_recent(circulars, lookback_days):
     today = date.today()
-    cutoff = today - timedelta(days=lookback_days - 1)  # inclusive window
-    return [c for c in circulars if c["date"] and cutoff <= c["date"] <= today]
+    cutoff = today - timedelta(days=lookback_days - 1)
+
+    result = []
+    for c in circulars:
+        if c["date"]:
+            if cutoff <= c["date"] <= today:
+                result.append(c)
+        else:
+            # include undated items (important fallback)
+            result.append(c)
+
 
 
 # ============================================================
