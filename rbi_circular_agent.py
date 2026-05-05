@@ -1,18 +1,16 @@
 #!/usr/bin/env python3
 """
-RBI Circular Daily Email Agent
-==============================
-Fetches RBI circulars/notifications published on (or near) today's date from
-https://www.rbi.org.in and emails a formatted digest to the recipient.
-
-Run it daily via cron / Task Scheduler / GitHub Actions.
+RBI Circular Daily Email Agent (Enhanced)
+==========================================
+Fetches RBI circulars with all details: Date, Department, Circular Number, 
+Attachment links, and formats them as per RBI official format.
 
 Usage:
     export SENDER_EMAIL="you@gmail.com"
     export SENDER_APP_PASSWORD="your_16_char_gmail_app_password"
     python rbi_circular_agent.py
 
-Required Python packages:
+Required packages:
     pip install requests beautifulsoup4 lxml
 """
 
@@ -36,22 +34,14 @@ RBI_NOTIFICATIONS_URL = "https://www.rbi.org.in/Scripts/NotificationUser.aspx"
 
 RECIPIENT_EMAIL = "manishsingh101@gmail.com"
 
-# Sender credentials are read from environment variables (safer than hardcoding).
-# For Gmail you must use an "App Password", not your normal password.
-# Generate one here: https://myaccount.google.com/apppasswords
 SENDER_EMAIL    = os.environ.get("SENDER_EMAIL")
 SENDER_PASSWORD = os.environ.get("SENDER_APP_PASSWORD")
 SMTP_SERVER     = os.environ.get("SMTP_SERVER", "smtp.gmail.com")
 SMTP_PORT       = int(os.environ.get("SMTP_PORT", "465"))
 
-# Look back this many days. Set to 1 to email only circulars dated today.
-# Set to 3 to cover weekends/holidays when no circulars are published.
 LOOKBACK_DAYS = int(os.environ.get("LOOKBACK_DAYS", "1"))
-
-# Always send an email even when there are no new circulars
 SEND_EMPTY_DIGEST = True
 
-# Network
 HTTP_TIMEOUT = 30
 USER_AGENT   = "Mozilla/5.0 (compatible; RBICircularDigestBot/1.0)"
 
@@ -68,9 +58,13 @@ DATE_PATTERNS = [
 ]
 
 DATE_REGEX = re.compile(
-    r"(?:[A-Za-z]{3,9}\s+\d{1,2},\s+\d{4}"            # Oct 03, 2025
-    r"|\d{1,2}\s+[A-Za-z]{3,9}\s+\d{4}"               # 03 Oct 2025
-    r"|\d{1,2}[-/]\d{1,2}[-/]\d{4})"                  # 03/10/2025
+    r"(?:[A-Za-z]{3,9}\s+\d{1,2},\s+\d{4}"
+    r"|\d{1,2}\s+[A-Za-z]{3,9}\s+\d{4}"
+    r"|\d{1,2}[-/]\d{1,2}[-/]\d{4})"
+)
+
+CIRCULAR_NUMBER_REGEX = re.compile(
+    r"(?:RBI/\d{4}-\d{2}/\d+|CIR/\w+/\d+|[A-Z\.]+\s*Circular\s+No\.?\s*\d+)"
 )
 
 
@@ -90,7 +84,41 @@ def parse_date(text: str):
     return None
 
 
+def extract_circular_number(text: str):
+    """Extract circular/notification number from text."""
+    if not text:
+        return ""
+    m = CIRCULAR_NUMBER_REGEX.search(text)
+    return m.group(0) if m else ""
+
+
+def extract_department(text: str):
+    """Extract department name from circular text."""
+    if not text:
+        return ""
+    
+    departments = [
+        "Monetary Policy",
+        "Banking Regulation",
+        "Foreign Exchange",
+        "Reserve Bank",
+        "Financial Services",
+        "Debt Management",
+        "Payment Systems",
+        "Department of Banking Regulation",
+        "Department of Corporate Services",
+        "RBI",
+    ]
+    
+    text_lower = text.lower()
+    for dept in departments:
+        if dept.lower() in text_lower:
+            return dept
+    return ""
+
+
 def fetch_circulars():
+    """Fetch all circulars from RBI page with complete details."""
     headers = {"User-Agent": USER_AGENT}
     resp = requests.get(RBI_NOTIFICATIONS_URL, headers=headers, timeout=HTTP_TIMEOUT)
     resp.raise_for_status()
@@ -99,46 +127,54 @@ def fetch_circulars():
     circulars = []
     seen_urls = set()
 
-    for link in soup.select("a[href*='NotificationUser.aspx?Id=']"):
-        title = link.get_text(strip=True)
-        href = link["href"]
+    # Parse table rows containing circulars
+    for row in soup.select("tr"):
+        cells = row.find_all("td")
+        if len(cells) < 3:
+            continue
 
+        # Extract data from cells
+        link = row.find("a", href=re.compile(r"NotificationUser\.aspx\?Id="))
+        if not link:
+            continue
+
+        title = link.get_text(strip=True)
+        href = link.get("href", "")
         full_url = urljoin(RBI_NOTIFICATIONS_URL, href)
+
         if full_url in seen_urls:
             continue
         seen_urls.add(full_url)
 
-        pub_date = None
-        dept = ""
+        # Extract publication date
+        pub_date = parse_date(row.get_text(" ", strip=True))
 
-        # 🔍 Try multiple ways to extract date
-        # Method 1: Parent row
-        parent_row = link.find_parent("tr")
-        if parent_row:
-            text = parent_row.get_text(" ", strip=True)
-            pub_date = parse_date(text)
+        # Extract circular number
+        circular_num = extract_circular_number(title) or extract_circular_number(row.get_text(" "))
 
-        # Method 2: Previous/next sibling text
-        if not pub_date:
-            sibling_text = link.parent.get_text(" ", strip=True)
-            pub_date = parse_date(sibling_text)
+        # Extract department
+        dept = extract_department(row.get_text(" "))
 
-        # Method 3: Whole page fallback (rare)
-        if not pub_date:
-            surrounding = link.find_parent().get_text(" ", strip=True)
-            pub_date = parse_date(surrounding)
+        # Extract attachment/PDF link
+        attachment_link = ""
+        pdf_link = row.find("a", href=re.compile(r"\.pdf|download", re.I))
+        if pdf_link:
+            attachment_link = urljoin(RBI_NOTIFICATIONS_URL, pdf_link.get("href", ""))
 
         circulars.append({
             "title": title,
             "url": full_url,
             "date": pub_date,
             "dept": dept,
+            "circular_num": circular_num,
+            "attachment": attachment_link,
         })
 
     return circulars
 
 
 def filter_recent(circulars, lookback_days):
+    """Filter circulars from the last N days."""
     today = date.today()
     cutoff = today - timedelta(days=lookback_days - 1)
 
@@ -148,8 +184,7 @@ def filter_recent(circulars, lookback_days):
             if cutoff <= c["date"] <= today:
                 result.append(c)
         else:
-            # include undated items (important fallback)
-                       result.append(c)
+            result.append(c)  # Include undated items as fallback
     return result
 
 
@@ -157,6 +192,7 @@ def filter_recent(circulars, lookback_days):
 # EMAIL
 # ============================================================
 def build_html_email(circulars, lookback_days: int) -> str:
+    """Build formatted HTML email matching RBI official format."""
     today_str = date.today().strftime("%A, %d %B %Y")
 
     if not circulars:
@@ -167,41 +203,87 @@ def build_html_email(circulars, lookback_days: int) -> str:
             f'<a href="{RBI_NOTIFICATIONS_URL}">RBI Notifications</a></p>'
         )
     else:
-        items = []
-        # FIX: Handle None dates by sorting them to the end
-        for c in sorted(circulars, key=lambda x: (x["date"] is None, x["date"]), reverse=True):
-            d = c["date"].strftime("%d %b %Y") if c["date"] else "—"
-            dept = f'<div style="color:#666;font-size:13px;">{c["dept"]}</div>' if c["dept"] else ""
-            items.append(
-                f'<li style="margin-bottom:14px;">'
-                f'<div><strong>{d}</strong> &nbsp;'
-                f'<a href="{c["url"]}" style="color:#0a58ca;text-decoration:none;">{c["title"]}</a></div>'
-                f'{dept}'
-                f'</li>'
-            )
-        body = (
-            f"<p>Here are the RBI circulars from the last "
-            f"{lookback_days} day(s) as of {today_str}:</p>"
-            f'<ul style="padding-left:18px;">{"".join(items)}</ul>'
-            f'<hr><p style="font-size:12px;color:#888;">'
-            f'Source: <a href="{RBI_NOTIFICATIONS_URL}">rbi.org.in/Scripts/NotificationUser.aspx</a><br>'
-            f'Sent automatically by your RBI Circular Agent.'
-            f'</p>'
+        # Sort by date (handle None dates)
+        sorted_circulars = sorted(
+            circulars, 
+            key=lambda x: (x["date"] is None, x["date"]), 
+            reverse=True
         )
+
+        table_rows = []
+        for i, c in enumerate(sorted_circulars, 1):
+            date_str = c["date"].strftime("%d-%m-%Y") if c["date"] else "—"
+            dept = c["dept"] or "—"
+            circ_num = c["circular_num"] or "—"
+            
+            # Build attachment link
+            attach_html = ""
+            if c["attachment"]:
+                attach_html = f'<a href="{c["attachment"]}" style="color:#0a58ca;text-decoration:none;">📎 Download PDF</a>'
+            else:
+                attach_html = '<a href="' + c["url"] + '" style="color:#0a58ca;text-decoration:none;">📎 View</a>'
+
+            table_rows.append(f"""
+            <tr style="border-bottom:1px solid #ddd;">
+                <td style="padding:10px;text-align:center;font-weight:bold;">{i}</td>
+                <td style="padding:10px;">{date_str}</td>
+                <td style="padding:10px;">{dept}</td>
+                <td style="padding:10px;"><strong>{circ_num}</strong></td>
+                <td style="padding:10px;">
+                    <a href="{c['url']}" style="color:#0a58ca;text-decoration:none;">{c['title']}</a>
+                </td>
+                <td style="padding:10px;text-align:center;">
+                    {attach_html}
+                </td>
+            </tr>
+            """)
+
+        body = f"""
+        <p><strong>RBI Circulars from the last {lookback_days} day(s) as of {today_str}:</strong></p>
+        <table style="width:100%;border-collapse:collapse;border:1px solid #ddd;">
+            <thead>
+                <tr style="background-color:#f5f5f5;font-weight:bold;">
+                    <th style="padding:10px;border:1px solid #ddd;text-align:center;">Sr</th>
+                    <th style="padding:10px;border:1px solid #ddd;">Date</th>
+                    <th style="padding:10px;border:1px solid #ddd;">Department</th>
+                    <th style="padding:10px;border:1px solid #ddd;">Circular No.</th>
+                    <th style="padding:10px;border:1px solid #ddd;">Subject/Title</th>
+                    <th style="padding:10px;border:1px solid #ddd;text-align:center;">Attachment</th>
+                </tr>
+            </thead>
+            <tbody>
+                {"".join(table_rows)}
+            </tbody>
+        </table>
+        <p style="font-size:12px;color:#888;margin-top:20px;">
+            <strong>Source:</strong> <a href="{RBI_NOTIFICATIONS_URL}">RBI Notifications Page</a><br>
+            Sent automatically by RBI Circular Agent
+        </p>
+        """
 
     return f"""\
 <!DOCTYPE html>
-<html><head><meta charset="utf-8"></head>
-<body style="font-family:-apple-system,Segoe UI,Roboto,Helvetica,Arial,sans-serif;
-             color:#222;max-width:680px;margin:auto;padding:16px;">
-  <h2 style="margin-bottom:6px;">RBI Circulars Digest</h2>
-  <div style="color:#666;margin-bottom:18px;">{today_str}</div>
-  {body}
-</body></html>
+<html>
+<head>
+    <meta charset="utf-8">
+    <style>
+        body {{ font-family: -apple-system, Segoe UI, Roboto, Helvetica, Arial, sans-serif; color: #222; max-width: 900px; margin: auto; padding: 16px; }}
+        table {{ font-size: 14px; }}
+        a {{ color: #0a58ca; text-decoration: none; }}
+        a:hover {{ text-decoration: underline; }}
+    </style>
+</head>
+<body>
+    <h2 style="margin-bottom:6px;">RBI Circulars Digest</h2>
+    <div style="color:#666;margin-bottom:18px;">{today_str}</div>
+    {body}
+</body>
+</html>
 """
 
 
 def send_email(html_body: str, subject: str):
+    """Send formatted email via Gmail SMTP."""
     if not SENDER_EMAIL or not SENDER_PASSWORD:
         raise RuntimeError(
             "SENDER_EMAIL and SENDER_APP_PASSWORD environment variables must be set."
