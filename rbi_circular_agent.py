@@ -149,8 +149,8 @@ def filter_recent(circulars, lookback_days):
                 result.append(c)
         else:
             # include undated items (important fallback)
-            result.append(c)
-return result
+                       result.append(c)
+    return result
 
 
 # ============================================================
