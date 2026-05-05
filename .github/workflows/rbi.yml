@@ -17,4 +17,4 @@ jobs:
         env:
           SENDER_EMAIL:        ${{ secrets.SENDER_EMAIL }}
           SENDER_APP_PASSWORD: ${{ secrets.SENDER_APP_PASSWORD }}
-          LOOKBACK_DAYS:       "1"
+          LOOKBACK_DAYS:       "5"
